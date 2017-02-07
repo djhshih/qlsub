@@ -2,9 +2,9 @@
 # Submit a list of jobs to a Grid Engine cluster for local execution
 #
 # Usage:
-#   qlist <script> <infile> [--outdir O] [--outext E] [--opts X]
+#   qlsub <script> <infile> [--outdir O] [--outext E] [--opts X]
 #     [--prefix P] [--logdir L] [--jobdir J] [--hisdir H] [--dryrun]
-#   qlist --help
+#   qlsub --help
 #
 # Required:
 #   script     script that takes two arguments: input and output file names
@@ -106,11 +106,11 @@ for fpath in $(cat $infile); do
 done
 
 
-# write qlist command line history
+# write qlsub command line history
 
 if [[ $dryrun == "false" ]]; then
 	set_cmd "$@"
 	timestamp=$(date '+%Y%m%dT%H%M%S')
-	echo "cd .. && $cmd" > "$hisdir/qlist_${scriptstem}_${timestamp}.sh"
+	echo "cd .. && $cmd" > "$hisdir/qlsub_${scriptstem}_${timestamp}.sh"
 fi
 

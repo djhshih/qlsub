@@ -14,6 +14,7 @@
 #   -h, --help      show this help message
 #   -o --outdir O   output directory [default: out]
 #   -e --outext E   output file extension [default: out]
+#   -s --submit S   job submit command [default: qsub]
 #   -x --opts X     qsub options
 #   -p --prefix P   job prefix [default: nixroot]
 #   -j --jobdir J   qsub script directory [default: job]
@@ -41,7 +42,7 @@ if [[ ! -d $jobdir ]]; then mkdir -p $jobdir; fi
 if [[ ! -d $logdir ]]; then mkdir -p $logdir; fi
 if [[ ! -d $hisdir ]]; then mkdir -p $hisdir; fi
 
-
+# 
 set_cmd() {
 	cmd="$0"
 	for arg in "$@"; do
@@ -95,7 +96,7 @@ for fpath in $(cat $infile); do
 
 		# submit job to cluster
 		if [[ $dryrun == "false" ]]; then
-			qsub $jobfile \
+			$submit $jobfile \
 				-o ${logdir}/'$JOB_NAME.o$JOB_ID' \
 				-e ${logdir}/'$JOB_NAME.e$JOB_ID'
 		fi

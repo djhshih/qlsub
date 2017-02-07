@@ -1,0 +1,115 @@
+#!/bin/bash
+# Submit a list of jobs to a Grid Engine cluster for local execution
+#
+# Usage:
+#   qlist <script> <infile> [--outdir O] [--outext E] [--opts X]
+#     [--prefix P] [--logdir L] [--jobdir J] [--hisdir H] [--dryrun]
+#   qlist --help
+#
+# Required:
+#   script     script that takes two arguments: input and output file names
+#   infile     text file with one input file name per line
+#
+# Options:
+#   -h, --help      show this help message
+#   -o --outdir O   output directory [default: out]
+#   -e --outext E   output file extension [default: out]
+#   -x --opts X     qsub options
+#   -p --prefix P   job prefix [default: nixroot]
+#   -j --jobdir J   qsub script directory [default: job]
+#   -l --logdir L   log directory [default: log]
+#   -h --hisdir H   directory for reproducible script [default: .history]
+#   -n --dryrun     create qsub scripts but do not submit
+#
+
+set -o errexit
+set -o nounset
+set -o pipefail
+IFS=$'\n\t'
+
+# parse command line arguments
+eval $(docoptp $0 -- "$@")
+
+# check for required argument
+if [[ -z ${script:-} ]]; then
+	exit 1
+fi
+
+
+if [[ ! -d $outdir ]]; then mkdir -p $outdir; fi
+if [[ ! -d $jobdir ]]; then mkdir -p $jobdir; fi
+if [[ ! -d $logdir ]]; then mkdir -p $logdir; fi
+if [[ ! -d $hisdir ]]; then mkdir -p $hisdir; fi
+
+
+set_cmd() {
+	cmd="$0"
+	for arg in "$@"; do
+		# quote argument if it contains spaces
+		if [[ $arg =~ ' ' ]]; then
+			cmd+=" '$arg'"
+		else
+			cmd+=" $arg"
+		fi
+	done
+}
+
+wd=$(pwd)
+scriptpath=$(readlink -f $script)
+scriptdir=${scriptpath%/*}
+scriptbase=${script##*/}
+scriptstem=${scriptbase%.*}
+
+
+# submit jobs
+
+for fpath in $(cat $infile); do
+
+	# remove substring from comment character to end of string
+	fpath=${fpath%%\#*}
+
+	# ignore comment lines
+	if [[ -z $fpath ]]; then continue; fi
+
+	fbase=${fpath##*/}
+	fstem=${fbase%.*}
+	outfile=$outdir/${fstem}.${outext}
+	rcfile=$outdir/.${fstem}.${outext}.rc
+	jobfile=${jobdir}/${scriptstem}_${fstem}.sh
+
+	# avoid repeating successful jobs by checking for local status file
+	if [[ ! -f $rcfile ]] || (( $(cat $rcfile) != 0 )); then
+
+		echo $fpath
+
+		# create script with unofficial strict mode
+		cat > $jobfile <<- EOF
+			#!/bin/bash
+			#$ -cwd -V $opts
+			set -euo pipefail
+			IFS=$'\n\t'
+			cd $wd
+			$prefix $scriptpath $fpath $outfile
+			echo \$? > $rcfile
+		EOF
+
+		# submit job to cluster
+		if [[ $dryrun == "false" ]]; then
+			qsub $jobfile \
+				-o ${logdir}/'$JOB_NAME.o$JOB_ID' \
+				-e ${logdir}/'$JOB_NAME.e$JOB_ID'
+		fi
+
+	fi
+
+done
+
+
+# write qlist command line history
+
+if [[ $dryrun == "false" ]]; then
+	set_cmd "$@"
+	timestamp=$(date '+%Y%m%dT%H%M%S')
+	echo "cd .. && $cmd" > "$hisdir/qlist_${scriptstem}_${timestamp}.sh"
+fi
+

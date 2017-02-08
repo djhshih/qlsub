@@ -2,7 +2,7 @@
 # Submit a list of jobs to a Grid Engine cluster for local execution
 #
 # Usage:
-#   qlsub <script> <infile> [--outdir O] [--outext E] [--opts X]
+#   qlsub <script> <infile> [--outdir O] [--outext E] [--submit S] [--opts X]
 #     [--prefix P] [--logdir L] [--jobdir J] [--hisdir H] [--dryrun]
 #   qlsub --help
 #

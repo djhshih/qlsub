@@ -2,8 +2,9 @@
 # Submit a list of jobs to a Grid Engine cluster for local execution
 #
 # Usage:
-#   qlsub <script> <infile> [--outdir O] [--outext E] [--submit S] [--opts X]
-#     [--prefix P] [--logdir L] [--jobdir J] [--hisdir H] [--dryrun]
+#   qlsub <script> <infile> [--outdir O] [--outext E] [--manager M] [--submit S] [--opts X]
+#     [--prefix P] [--logdir L] [--jobdir J] [--hisdir H]
+#     [--array] [--nodotkit] [--destdir] [--dryrun]
 #   qlsub --help
 #
 # Required:
@@ -14,15 +15,23 @@
 #   -h, --help      show this help message
 #   -o --outdir O   output directory [default: out]
 #   -e --outext E   output file extension [default: out]
-#   -s --submit S   job submit command [default: qsub]
+#   -m --manager M  Computing resource manager [default: sge]
+#   -s --submit S   job submit command
 #   -x --opts X     qsub options
-#   -p --prefix P   job prefix [default: nixroot]
+#   -p --prefix P   job prefix
 #   -j --jobdir J   qsub script directory [default: job]
 #   -l --logdir L   log directory [default: log]
 #   -h --hisdir H   directory for reproducible script [default: .history]
+#   -t --array      use task array
+#   -D --nodotkit   do not append dotkit use statements
+#   -d --destdir    output destination is a directory
 #   -n --dryrun     create qsub scripts but do not submit
 #
 
+# Dependencies:
+# - docoptp
+
+# strict mode
 set -o errexit
 set -o nounset
 set -o pipefail
@@ -36,13 +45,83 @@ if [[ -z ${script:-} ]]; then
 	exit 1
 fi
 
+if [[ -z ${submit} ]]; then
+	case $manager in
+		lsf)
+			submit="bsub"
+			;;
+		moab)
+			submit="msub"
+			;;
+		slurm)
+			submit="sbatch"
+			;;
+		*)
+			submit="qsub"
+			;;
+	esac
+fi
+
+
+case $manager in
+	sge)
+		marker="$"
+		arg_job_name="-N"
+		arg_job_array="-t"
+		arg_export_env="-V"
+		vn_job_id="\$JOB_ID"
+		vn_job_name="\$JOB_NAME"
+		vn_task_id="\$SGE_TASK_ID"
+		;;
+	pbs)
+		marker="PBS"
+		arg_job_name="-N"
+		arg_job_array="-t"
+		arg_export_env="-V"
+		vn_job_id="\$PBS_JOBID"
+		vn_job_name="\$PBS_JOBNAME"
+		vn_task_id="\$PBS_ARRAYID"
+		;;
+	lsf)
+		marker="BSUB"
+		arg_job_name="-J"
+		# job array syntax for LSF is very different:
+		# for now, we do not support this feature
+		arg_export_env="-env all"
+		#vn_job_id="\$LSB_JOBID"
+		#vn_job_name="\$LSB_JOBNAME"
+		#vn_task_id="\$LSB_JOBINDEX"
+		# LSF does not have a special variable for job name
+		vn_job_id="%J"
+		vn_job_name="%J"
+		vn_task_id="%I"
+		;;	
+	slurm)
+		marker="SBATCH"
+		arg_job_name="-J"
+		arg_job_array="-a"
+		arg_export_env="--export=ALL"
+		vn_job_id="%A"
+		vn_job_name="%x"
+		vn_task_id="%a"
+		;;
+	*)
+		echo "Invalid $manager" >&2
+		exit 1
+esac
+
+# convert paths to fullpaths
+outdir=$(readlink -f $outdir)
+jobdir=$(readlink -f $jobdir)
+logdir=$(readlink -f $logdir)
+hisdir=$(readlink -f $hisdir)
 
 if [[ ! -d $outdir ]]; then mkdir -p $outdir; fi
 if [[ ! -d $jobdir ]]; then mkdir -p $jobdir; fi
 if [[ ! -d $logdir ]]; then mkdir -p $logdir; fi
 if [[ ! -d $hisdir ]]; then mkdir -p $hisdir; fi
 
-# 
+# set `cmd` variable with command line history
 set_cmd() {
 	cmd="$0"
 	for arg in "$@"; do
@@ -64,46 +143,128 @@ scriptstem=${scriptbase%.*}
 
 # submit jobs
 
+i=1
 for fpath in $(cat $infile); do
 
 	# remove substring from comment character to end of string
 	fpath=${fpath%%\#*}
 
-	# ignore comment lines
+	# ignore empty lines (and stripped comment lines)
 	if [[ -z $fpath ]]; then continue; fi
 
 	fbase=${fpath##*/}
 	fstem=${fbase%.*}
-	outfile=$outdir/${fstem}.${outext}
-	rcfile=$outdir/.${fstem}.${outext}.rc
-	jobfile=${jobdir}/${scriptstem}_${fstem}.sh
+	ffpath=$(realpath --no-symlinks $fpath)
+	if [[ $destdir == "true" ]]; then
+		outpath=$outdir/${fstem}
+		rcfile=$outdir/.${fstem}.rc
+		mkdir -p $outpath
+	else
+		outpath=$outdir/${fstem}.${outext}
+		rcfile=$outdir/.${fstem}.${outext}.rc
+	fi
+	jobfile=${jobdir}/${scriptstem}_${i}.sh
 
-	# avoid repeating successful jobs by checking for local status file
+	# avoid repeating successful jobs by checking for local return code (rc) file
 	if [[ ! -f $rcfile ]] || (( $(cat $rcfile) != 0 )); then
 
 		echo $fpath
 
-		# create script with unofficial strict mode
+		# initialize script header
 		cat > $jobfile <<- EOF
 			#!/bin/bash
-			#$ -cwd -V $opts
-			set -euo pipefail
+			#$marker $arg_export_env
+			#$marker $arg_job_name ${scriptstem}_${fstem}
+			#$marker -o ${logdir}/${vn_job_name}.o${vn_job_id}
+			#$marker -e ${logdir}/${vn_job_name}.e${vn_job_id}
+			#$marker $opts
+
+			# prevent core dump
+			ulimit -c 0
+
+		EOF
+
+		# append dotkit settings, if any
+		# NB If dotkit packages are loaded by `use` instead of `reuse`,
+		#    the qsub -V flag will inherit environmental variables and fool dotkit
+		#    into believing that the packages had been loaded; 
+		#    dotkit will thus not make any modifications (e.g. to $LD_LIBRARY_PATH)
+		#    Therefore, dotkit packages should be force-loaded using `reuse`.
+		if [[ $nodotkit == "false" && -f $HOME/.dotkitrc ]]; then
+			sed 's/^use /reuse /' $HOME/.dotkitrc >> $jobfile
+		fi
+
+		# append unofficial strict mode and payload
+		cat >> $jobfile <<- EOF
+			# set strict mode
+			set -o errexit
+			set -o nounset
+			set -o pipefail
 			IFS=$'\n\t'
-			cd $wd
-			$prefix $scriptpath $fpath $outfile
-			echo \$? > $rcfile
+
+			if [[ ! -f $rcfile ]] || (( \$(cat $rcfile) != 0 )); then
+				cd $wd
+				$prefix $scriptpath $ffpath $outpath
+				echo \$? > $rcfile
+			fi
 		EOF
 
 		# submit job to cluster
 		if [[ $dryrun == "false" ]]; then
-			$submit $jobfile \
-				-o ${logdir}/'$JOB_NAME.o$JOB_ID' \
-				-e ${logdir}/'$JOB_NAME.e$JOB_ID'
+			if [[ $array == "false" ]]; then
+				$submit $jobfile
+			fi
 		fi
 
 	fi
 
+	(( i++ ))
+
 done
+
+(( i-- ))
+
+# create task array script and submit
+if [[ $array == "true" && $manager != "lsf" ]]; then
+	jobsfile=${jobdir}/${scriptstem}_all.sh
+
+	# initialize script header
+	cat > $jobsfile <<- EOF
+		#!/bin/bash
+		#$marker $arg_job_array 1-$i
+		#$marker $arg_export_env
+		#$marker $arg_job_name ${scriptstem}_all
+		#$marker -o ${logdir}/${vn_job_name}.o${vn_job_id}.${vn_task_id}
+		#$marker -e ${logdir}/${vn_job_name}.e${vn_job_id}.${vn_task_id}
+		#$marker $opts
+
+		# prevent core dump
+		ulimit -c 0
+
+	EOF
+
+	# append dotkit settings, if any
+	if [[ $nodotkit == "false" && -f $HOME/.dotkitrc ]]; then
+		sed 's/^use /reuse /' $HOME/.dotkitrc >> $jobsfile
+	fi
+
+	# append unofficial strict mode and payload
+	cat >> $jobsfile <<- EOF
+		# set strict mode
+		set -o errexit
+		set -o nounset
+		set -o pipefail
+		IFS=$'\n\t'
+
+		bash ${jobdir}/${scriptstem}_${vn_task_id}.sh
+	EOF
+
+	# submit task array job
+	if [[ $dryrun == "false" ]]; then
+		$submit $jobsfile
+	fi
+	
+fi
 
 
 # write qlsub command line history
@@ -111,6 +272,6 @@ done
 if [[ $dryrun == "false" ]]; then
 	set_cmd "$@"
 	timestamp=$(date '+%Y%m%dT%H%M%S')
-	echo "cd .. && $cmd" > "$hisdir/qlsub_${scriptstem}_${timestamp}.sh"
+	echo "$cmd" > "$hisdir/qlsub_${scriptstem}_${timestamp}.sh"
 fi
 
